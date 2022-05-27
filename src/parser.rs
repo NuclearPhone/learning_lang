@@ -148,12 +148,14 @@ fn parse_factor(stream: &str) -> ParserResult<Node>
 
 fn parse_term(stream: &str) -> ParserResult<Node> 
 {
-  let (stream, left) = parse_factor(stream)?;
+  let (mut stream, mut left) = parse_factor(stream)?;
 
-  if let Some((stream, op @ (Token::Asterisk | Token::Solidus))) = lex(&stream)
+  // peek forward, if it satisfies the condition feed the peek stream back into the actual stream
+  while let Some((peek_stream, op @ (Token::Asterisk | Token::Solidus))) = lex(&stream)
   {
-    let (stream, right) = parse_term(&stream)?;
-    return Ok((stream, Node::make_binary(left, right, &op)))
+    let right: Node;
+    (stream, right) = parse_factor(&peek_stream)?;
+    left = Node::make_binary(left, right, &op);
   }
 
   Ok((stream, left))
@@ -161,12 +163,13 @@ fn parse_term(stream: &str) -> ParserResult<Node>
 
 fn parse_expr(stream: &str) -> ParserResult<Node> 
 {
-  let (stream, left) = parse_term(stream)?;
+  let (mut stream, mut left) = parse_term(stream)?;
 
-  if let Some((stream, op @ (Token::Plus | Token::Minus))) = lex(&stream)
+  while let Some((peek_stream, op @ (Token::Plus | Token::Minus))) = lex(&stream)
   {
-    let(stream, right) = parse_expr(&stream)?;
-    return Ok((stream, Node::make_binary(left, right, &op)))
+    let right: Node;
+    (stream, right) = parse_term(&peek_stream)?;
+    left = Node::make_binary(left, right, &op)
   }
 
   Ok((stream, left))

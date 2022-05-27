@@ -11,7 +11,7 @@ fn main() {
   println!("send input with a double enter");
   println!("exit with 'exit'");
 
-  let mut stdin = std::io::stdin();
+  let stdin = std::io::stdin();
 
   let mut total_input = String::new();
 
@@ -25,7 +25,10 @@ fn main() {
     if input == "\n"
     {
       if total_input == "quit\n\n" { break }
+
       let ast = parser::parse(&total_input);
+
+      println!("{:#?}", &ast);
 
       match ast
       {
