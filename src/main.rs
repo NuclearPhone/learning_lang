@@ -1,42 +1,45 @@
-use std::io::{stdout, Write};
+use std::process::exit;
 
-use crate::execute::execute;
+use frontend::parser::parse;
 
-mod lexer;
-mod parser;
+mod arguments;
+mod frontend;
 mod execute;
+mod repl;
 
-fn main() {
-  println!("rustlang REPL, enter some shit");
-  println!("send input with a double enter");
-  println!("exit with 'exit'");
+fn main() 
+{
+  let args = arguments::parse_args();
 
-  let stdin = std::io::stdin();
-
-  let mut total_input = String::new();
-
-  loop
+  // if a root file is undefined, enter repl mode
+  if args.root_file.is_empty()
   {
-    let mut input = String::new();
-    print!("> ");
-    stdout().flush().unwrap();
-    stdin.read_line(&mut input).unwrap();
-    total_input += &input;
-    if input == "\n"
+    repl::run_repl();
+  }
+
+  // otherwise start parsing a root file
+  if let Ok(_filedata) = std::fs::read(&args.root_file)
+  {
+    let filedata = String::from_utf8(_filedata).unwrap();
+
+    if !filedata.is_ascii()
     {
-      if total_input == "quit\n\n" { break }
-
-      let ast = parser::parse(&total_input);
-
-      println!("{:#?}", &ast);
-
-      match ast
-      {
-        Ok(v) => execute(v),
-        Err(e) => println!("ERROR: {}", e)
-      }
-
-      total_input.clear();
+      println!("file {} is not a valid binary ascii file", args.root_file);
+      exit(1);
     }
+
+    match parse(&filedata) {
+      Ok(ast) => {
+        if args.verbose { println!("{:#?}", ast) }
+
+        execute::execute(ast);
+      },
+      Err(e) => {
+        println!("{}", e);
+        exit(1);
+      }
+    } 
+  } else {
+    println!("failed to open file {}", args.root_file);
   }
 }

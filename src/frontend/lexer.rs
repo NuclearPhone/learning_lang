@@ -4,9 +4,16 @@ enum Token
 {
   Nothing,
   Plus, Minus, Asterisk, Solidus,
-  Equal, Colon,
+  Equal,
+
+  At,
+
+  Semicolon, Colon,
+
+  Comma, Period,
 
   LeftParanthesis, RightParanthesis,
+  LeftBracket, RightBracket,
   LeftBrace, RightBrace,
 
   RightArrow,
@@ -27,7 +34,7 @@ pub
 type Lexer = (String, Token);
 
 pub
-fn lex(stream: &str) -> Option<Lexer>
+fn lex(stream: &str) -> Result<Lexer, String>
 {
   let mut chars = stream.chars().peekable();
 
@@ -41,7 +48,7 @@ fn lex(stream: &str) -> Option<Lexer>
   {
     Some(c) => {
       macro_rules! next_and_ret {
-        ($iter: expr, $ret: expr) => { { $iter.next(); Some(($iter.collect::<String>(), $ret)) } }
+        ($iter: expr, $ret: expr) => { { $iter.next(); Ok(($iter.collect::<String>(), $ret)) } }
       }
       match c
       {
@@ -53,15 +60,22 @@ fn lex(stream: &str) -> Option<Lexer>
         ')' => next_and_ret!(chars, Token::RightParanthesis),
         '{' => next_and_ret!(chars, Token::LeftBrace),
         '}' => next_and_ret!(chars, Token::RightBrace),
+        '[' => next_and_ret!(chars, Token::LeftBracket),
+        ']' => next_and_ret!(chars, Token::RightBracket),
+        ',' => next_and_ret!(chars, Token::Comma),
+        '.' => next_and_ret!(chars, Token::Period),
+        '@' => next_and_ret!(chars, Token::At),
+        ':' => next_and_ret!(chars, Token::Colon),
+        ';' => next_and_ret!(chars, Token::Semicolon),
 
         '-' => {
           chars.next();
 
           if let Some(c) = chars.peek() {
-            if *c == '>' { chars.next(); return Some((chars.collect::<String>(), Token::RightArrow)) } 
+            if *c == '>' { chars.next(); return Ok((chars.collect::<String>(), Token::RightArrow)) } 
           }
 
-          Some((chars.collect::<String>(), Token::Minus))
+          Ok((chars.collect::<String>(), Token::Minus))
         },
 
         _ if c.is_alphabetic() =>
@@ -74,7 +88,7 @@ fn lex(stream: &str) -> Option<Lexer>
             out.push(chars.next().unwrap());
           }
 
-          Some((chars.collect::<String>(), Token::Identifier(out)))
+          Ok((chars.collect::<String>(), Token::Identifier(out)))
         },
         _ if c.is_numeric() =>
         {
@@ -86,12 +100,12 @@ fn lex(stream: &str) -> Option<Lexer>
             else { out.push(chars.next().unwrap()); }
           }
 
-          Some((chars.collect::<String>(), Token::Number(out.parse::<f64>().unwrap())))
+          Ok((chars.collect::<String>(), Token::Number(out.parse::<f64>().unwrap())))
         }
         _ => panic!("unknown character in lexer, faulting!")
       }
     },
-    None => None
+    None => Err("ran out of tokens to parse".to_owned())
   }
 }
 
@@ -102,19 +116,19 @@ macro_rules! lex_peek
     {   
       assert!($peek >= 1);
       let mut counter = 0;
-      let mut stream: String = $stream.clone();
+      let mut stream: String = $stream.to_owned();
       loop
       {
         counter += 1;
 
-        if let Some(fwd) = lex(&stream) {
+        if let Ok(fwd) = lex(&stream) {
           let tok: Token;
           (stream, tok) = fwd;
           if counter == $peek {
-            break Some((stream, tok))
+            break Ok((stream, tok))
           }
         } else {
-          break None
+          break Err("ran out of tokens to parse".to_owned())
         }
       }
     }
