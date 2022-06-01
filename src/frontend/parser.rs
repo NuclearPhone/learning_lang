@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::{collections::HashMap, io::Write};
 
 use crate::lex_peek;
 use super::lexer::{Token, lex};
@@ -7,6 +7,7 @@ use super::lexer::{Token, lex};
 pub enum TypeName
 {
   Void,
+  Boolean,
   Numeric,
   String,
   Custom(String)
@@ -19,6 +20,9 @@ enum Node
   Nothing,
   TokenVal(Token),
   Block(Vec<Node>),
+  If { condition: Box<Node>, eval: Box<Node>, else_eval: Option<Box<Node>> },
+  While { condition: Box<Node>, eval: Box<Node> },
+  // TODO: for, needs a way to interact with iterators
   Binary { left: Box<Node>, right: Box<Node>, op: Token },
   VarDef {name: String, typename: TypeName, exec: Box<Node>},
   FuncCall {name: String, args: Vec<Node>},
@@ -41,20 +45,18 @@ pub struct FunctionDef
   exec: Node,
 }
 
-#[derive(Debug)]
-pub struct InternalFunctionDef
-{
-  name: String,
-  parameters: Vec<(String, TypeName)>,
-  rettype: TypeName
-}
-
 impl FunctionDef
 {
   pub
   fn get_name(self: &Self) -> &String
   {
     return &self.name;
+  }
+
+  pub
+  fn get_params(&self) -> &Vec<(String, TypeName)>
+  {
+    &self.parameters
   }
 
   pub
@@ -74,7 +76,6 @@ impl FunctionDef
 pub struct RootUnit
 {
   funcs: HashMap<String, FunctionDef>,
-  internal_funcs: HashMap<String, InternalFunctionDef>
 }
 
 impl RootUnit
@@ -123,13 +124,11 @@ fn parse_id(stream: &str) -> ParserResult<Node>
 
 fn parse_raw_id(stream: &str) -> ParserResult<String>
 {
-  if let Ok((stream, Token::Identifier(s))) = lex(&stream)
+  match lex(&stream)
   {
-    Ok((stream, s))
-  }
-  else
-  {
-    Err("Failed to parse a raw identifier".to_owned())
+    Ok((stream, Token::Identifier(s))) => Ok((stream, s)),
+    Ok((_, x)) => Err(format!("Failed to parse a raw identifier, found {:?}", x)),
+    Err(_) => Err(format!("Failed to parse a raw identifier, ran out of tokens."))
   }
 }
 
@@ -216,18 +215,31 @@ fn parse_internal_func_call(stream: &str) -> ParserResult<Node>
 
 fn parse_factor(stream: &str) -> ParserResult<Node>
 {
-  if let Ok((_, Token::LeftParanthesis)) = lex_peek!(stream, 2) {
-    parse_func_call(stream)
-  }
-  else if let Ok((_, Token::At)) = lex(&stream) {
-    parse_internal_func_call(&stream)
-  }
-  else if let Ok((stream, tok)) = lex(&stream)
+  if let Ok((used_stream, tok)) = lex(&stream)
   {
     match tok 
     {
-      Token::Identifier(_) | Token::Number(_) => 
-        Ok((stream, Node::TokenVal(tok))),
+      Token::At =>
+      {
+        parse_internal_func_call(&stream)
+      },
+      Token::Identifier(_) =>
+      {
+        if let Ok((_, Token::LeftParanthesis)) = lex_peek!(stream, 2) {
+          parse_func_call(stream)
+        } else {
+          Ok((used_stream, Node::TokenVal(tok)))
+        }
+      },
+      Token::Number(_) | Token::String(_) => 
+        Ok((used_stream, Node::TokenVal(tok))),
+      Token::LeftParanthesis => {
+        let (stream, inside) = parse_assignment(&used_stream)?;
+        let stream = expect_err(&stream, Token::RightParanthesis, 
+          "expected right paranthesis while parsing a factor"
+        )?;
+        Ok((stream, inside))
+      },
       _ => Err("Failed to parse a factor".to_owned())
     }
   } else {
@@ -264,18 +276,46 @@ fn parse_expr(stream: &str) -> ParserResult<Node>
   Ok((stream, left))
 }
 
+fn parse_noteq(stream: &str) -> ParserResult<Node>
+{
+  let (mut stream, mut left) = parse_expr(stream)?;
+
+  while let Ok((peek_stream, op @ (Token::LeftChevron | Token::RightChevron))) = lex(&stream)
+  {
+    let right: Node;
+    (stream, right) = parse_expr(&peek_stream)?;
+    left = Node::make_binary(left, right, &op)
+  }
+
+  Ok((stream, left))
+}
+
+fn parse_eq(stream: &str) -> ParserResult<Node>
+{
+  let (mut stream, mut left) = parse_noteq(stream)?;
+
+  while let Ok((peek_stream, op @ (Token::Equalescent | Token::NotEqualescent))) = lex(&stream)
+  {
+    let right: Node;
+    (stream, right) = parse_noteq(&peek_stream)?;
+    left = Node::make_binary(left, right, &op)
+  }
+
+  Ok((stream, left))
+}
+
 fn parse_assignment(stream: &str) -> ParserResult<Node>
 {
   if let Ok((_, Token::Equal)) = lex_peek!(stream.to_owned(), 2)
   {
     let (stream, left)  = parse_id(&stream)?; 
     let stream = expect(&stream, Token::Equal)?;
-    let (stream, right) = parse_expr(&stream)?;
+    let (stream, right) = parse_eq(&stream)?;
     Ok((stream, Node::make_binary(left, right, &Token::Equal)))
   }
   else
   {
-    parse_expr(stream)
+    parse_eq(stream)
   }
 }
 
@@ -297,7 +337,6 @@ fn parse_vardef(stream: &str) -> ParserResult<Node>
     exec = Box::new(_exec);
     stream = newstream;
   }
-  
 
   Ok((
     stream,
@@ -310,7 +349,51 @@ fn parse_statement_or_expr(stream: &str) -> ParserResult<Node>
   if let (_, Token::Colon) = lex_peek!(stream, 2)? {
     parse_vardef(stream)
   } else {
-    parse_assignment(stream)
+    let (stream, condition) = parse_assignment(stream)?;
+
+    // IF parsing
+    if let (stream, Token::Question) = lex(&stream)? {
+      let (stream, eval) = parse_assignment(&stream)?;
+
+      if let (stream, Token::Bang) = lex(&stream) ? {
+        let (stream, else_eval) = parse_statement_or_expr(&stream)?;
+
+        Ok((
+          stream,
+          Node::If {
+            condition: Box::new(condition),
+            eval: Box::new(eval),
+            else_eval: Some(Box::new(else_eval))
+          }
+        ))
+      } else {
+        Ok((
+          stream, 
+          Node::If {
+            condition: Box::new(condition),
+            eval: Box::new(eval),
+            else_eval: None
+          }
+        ))
+      }
+    }
+    // WHILE PARSING
+    else if let (stream, Token::RightArrow) = lex(&stream)? {
+      let (stream, eval) = parse_block_or_stexpr(&stream)?;
+
+      Ok((
+        stream,
+        Node::While{
+          condition: Box::new(condition),
+          eval: Box::new(eval)
+        }
+      ))
+    }
+
+    // if no statement, go to default parsing
+    else {
+      Ok((stream, condition))
+    }
   }
 }
 
@@ -343,6 +426,8 @@ fn parse_type(stream: &str) -> ParserResult<TypeName>
   {
     "void"   => Ok((stream, TypeName::Void)),
     "number" => Ok((stream, TypeName::Numeric)),
+    "bool"   => Ok((stream, TypeName::Boolean)),
+    "string" => Ok((stream, TypeName::String)),
     _ => Err("unknown typename".to_owned())
   }
 }
@@ -360,8 +445,6 @@ fn parse_decl_parameters(stream: &str) -> ParserResult<Vec<(String, TypeName)>>
     {
       let parsed_type: TypeName;
       let name: String;
-
-      println!("{}", stream);
 
       (stream, name) = parse_raw_id(&stream)?;
       stream = expect_err(&stream, Token::Colon, "expected a type-colon in parameter declaration")?;
@@ -429,51 +512,16 @@ fn parse_function_definition(stream: &str) -> ParserResult<FunctionDef>
   ))
 }
 
-fn parse_internal_function(stream: &str) -> ParserResult<InternalFunctionDef>
-{
-  let stream = expect(stream, Token::At)?;
-  let (stream, id) = parse_raw_id(&stream)?;
-  
-  let (stream, parameters) = parse_decl_parameters(&stream)?;
-
-  let stream = expect(&stream, Token::RightArrow)?;
-  let (stream, typename) = parse_type(&stream)?;
-
-  let stream = expect(&stream, Token::Semicolon)?;
-
-  Ok((
-    stream,
-    InternalFunctionDef 
-    {
-      name: id,
-      parameters,
-      rettype: typename
-    }
-  ))
-}
-
 pub fn parse(stream_in: &str) -> Result<RootUnit, String>
 {
   let mut stream: String = stream_in.to_owned();
 
   let mut funcs: HashMap<String, FunctionDef> = HashMap::new();
-  let mut internal_funcs: HashMap<String, InternalFunctionDef> = HashMap::new();
 
   // run until dry
   while let Ok(_) = lex(&stream)
   {
-    if let Ok((_, Token::At)) = lex_peek!(&stream, 1)
-    {
-      let (new_stream, func) = parse_internal_function(&stream)?;
-      stream = new_stream;
-
-      if let None = internal_funcs.get(&func.name) {
-        internal_funcs.insert(func.name.clone(), func);
-      } else {
-        return Err(format!("more than one internal function declaration of name {}", func.name));
-      }
-    }
-    else if let Ok((_, Token::LeftParanthesis)) = lex_peek!(&stream, 2)
+    if let Ok((_, Token::LeftParanthesis)) = lex_peek!(&stream, 2)
     {
       let (new_stream, func) = parse_function_definition(&stream)?;
       stream = new_stream;
@@ -492,7 +540,6 @@ pub fn parse(stream_in: &str) -> Result<RootUnit, String>
     RootUnit
     {
       funcs,
-      internal_funcs
     }
   )
 }

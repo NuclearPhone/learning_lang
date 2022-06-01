@@ -15,10 +15,15 @@ enum Token
   LeftParanthesis, RightParanthesis,
   LeftBracket, RightBracket,
   LeftBrace, RightBrace,
+  LeftChevron, RightChevron,
 
   RightArrow,
 
+  Equalescent, NotEqualescent,
+  Bang, Question,
+
   Identifier(String),
+  String(String),
   Number(f64)
 }
 
@@ -55,18 +60,57 @@ fn lex(stream: &str) -> Result<Lexer, String>
         '+' => next_and_ret!(chars, Token::Plus),
         '*' => next_and_ret!(chars, Token::Asterisk),
         '/' => next_and_ret!(chars, Token::Solidus),
-        '=' => next_and_ret!(chars, Token::Equal),
         '(' => next_and_ret!(chars, Token::LeftParanthesis),
         ')' => next_and_ret!(chars, Token::RightParanthesis),
         '{' => next_and_ret!(chars, Token::LeftBrace),
         '}' => next_and_ret!(chars, Token::RightBrace),
         '[' => next_and_ret!(chars, Token::LeftBracket),
         ']' => next_and_ret!(chars, Token::RightBracket),
+        '<' => next_and_ret!(chars, Token::LeftChevron),
+        '>' => next_and_ret!(chars, Token::RightChevron),
         ',' => next_and_ret!(chars, Token::Comma),
         '.' => next_and_ret!(chars, Token::Period),
         '@' => next_and_ret!(chars, Token::At),
         ':' => next_and_ret!(chars, Token::Colon),
         ';' => next_and_ret!(chars, Token::Semicolon),
+
+        '?' => next_and_ret!(chars, Token::Question),
+
+        '"' => {
+          chars.next().unwrap();
+
+          let mut string = String::new();
+
+          while let Some(c) = chars.next() {
+            if c == '"' { break }
+            else { string.push(c); }
+          }
+
+          Ok((chars.collect::<String>(), Token::String(string)))
+        },
+
+        '=' => {
+          chars.next();
+
+          if let Some(c) = chars.peek() {
+            if *c == '=' { chars.next(); return Ok((chars.collect::<String>(), Token::Equalescent)) }
+          }
+
+          Ok((chars.collect::<String>(), Token::Equal))
+        },
+
+        '!' => {
+          chars.next();
+
+          if let Some(c) = chars.peek() {
+            if *c == '=' { 
+              chars.next(); 
+              return Ok((chars.collect::<String>(), Token::NotEqualescent)) 
+            }
+          } 
+
+          Ok((chars.collect::<String>(), Token::Bang))
+        },
 
         '-' => {
           chars.next();
@@ -84,7 +128,7 @@ fn lex(stream: &str) -> Result<Lexer, String>
 
           while let Some(c) = chars.peek()
           {
-            if !c.is_alphanumeric() { break }
+            if !c.is_alphanumeric() && !c.eq(&'_') { break }
             out.push(chars.next().unwrap());
           }
 

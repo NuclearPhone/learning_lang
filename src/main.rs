@@ -1,10 +1,11 @@
 use std::process::exit;
 
 use frontend::parser::parse;
+use interpreter::vm;
 
 mod arguments;
 mod frontend;
-mod execute;
+mod interpreter;
 mod repl;
 
 fn main() 
@@ -32,7 +33,7 @@ fn main()
       Ok(ast) => {
         if args.verbose { println!("{:#?}", ast) }
 
-        execute::execute(ast);
+        vm::execute(ast);
       },
       Err(e) => {
         println!("{}", e);

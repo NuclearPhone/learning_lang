@@ -10,7 +10,7 @@ use crossterm::{
 use std::{io::Write,  time::Duration};
 
 use crate::frontend::parser;
-use crate::execute;
+use crate::interpreter::vm;
 
 const DISPLAY_PREFIX: &'static str = "rustlang";
 
@@ -108,7 +108,7 @@ fn run_repl()
       
       match ast
       {
-        Ok(v) => execute::execute(v),
+        Ok(v) => vm::execute(v),
         Err(e) => println!("ERROR: {}", e)
       }
 
