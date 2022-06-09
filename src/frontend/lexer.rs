@@ -35,147 +35,175 @@ impl Default for Token
   }
 }
 
-pub
-type Lexer = (String, Token);
-
-pub
-fn lex(stream: &str) -> Result<Lexer, String>
+#[derive(Clone)]
+pub struct Lexer 
 {
-  let mut chars = stream.chars().peekable();
+  current_line: String, // used for printing debugging information 
+  chars: String,
+}
 
-  while let Some(c) = chars.peek()
+impl Lexer
+{
+  pub fn new(input: &str) -> Self
   {
-    if !c.is_whitespace() { break; }
-    else { chars.next(); }
+    Lexer {
+      current_line: String::new(),
+      chars: input.to_owned()
+    }
+  }
+  fn next_char(&mut self) -> Option<char> {
+    if let Some(c) = self.chars.pop() {
+      if c == '\n' {
+        self.current_line.clear()
+      } else {
+        self.current_line.push(c)
+      }
+
+      Some(c)
+    } else {
+      None
+    }
   }
 
-  match chars.peek()
+  fn peek_char(&self) -> Option<char> {
+    self.chars.chars().nth(0)
+  }
+
+
+}
+pub fn lex(lexer: Lexer) -> Result<(Lexer, Token), String>
+{
+  while let Some(c) = lexer.next_char()
+  {
+    if !c.is_whitespace() { break; }
+  }
+
+  match lexer.peek_char()
   {
     Some(c) => {
       macro_rules! next_and_ret {
-        ($iter: expr, $ret: expr) => { { $iter.next(); Ok(($iter.collect::<String>(), $ret)) } }
+        ($iter: expr, $ret: expr) => { { 
+          $iter.next_char(); 
+          Ok(($iter, $ret)) 
+        } }
       }
       match c
       {
-        '+' => next_and_ret!(chars, Token::Plus),
-        '*' => next_and_ret!(chars, Token::Asterisk),
-        '/' => next_and_ret!(chars, Token::Solidus),
-        '(' => next_and_ret!(chars, Token::LeftParanthesis),
-        ')' => next_and_ret!(chars, Token::RightParanthesis),
-        '{' => next_and_ret!(chars, Token::LeftBrace),
-        '}' => next_and_ret!(chars, Token::RightBrace),
-        '[' => next_and_ret!(chars, Token::LeftBracket),
-        ']' => next_and_ret!(chars, Token::RightBracket),
-        '<' => next_and_ret!(chars, Token::LeftChevron),
-        '>' => next_and_ret!(chars, Token::RightChevron),
-        ',' => next_and_ret!(chars, Token::Comma),
-        '.' => next_and_ret!(chars, Token::Period),
-        '@' => next_and_ret!(chars, Token::At),
-        ':' => next_and_ret!(chars, Token::Colon),
-        ';' => next_and_ret!(chars, Token::Semicolon),
+        '+' => next_and_ret!(lexer, Token::Plus),
+        '*' => next_and_ret!(lexer, Token::Asterisk),
+        '/' => next_and_ret!(lexer, Token::Solidus),
+        '(' => next_and_ret!(lexer, Token::LeftParanthesis),
+        ')' => next_and_ret!(lexer, Token::RightParanthesis),
+        '{' => next_and_ret!(lexer, Token::LeftBrace),
+        '}' => next_and_ret!(lexer, Token::RightBrace),
+        '[' => next_and_ret!(lexer, Token::LeftBracket),
+        ']' => next_and_ret!(lexer, Token::RightBracket),
+        '<' => next_and_ret!(lexer, Token::LeftChevron),
+        '>' => next_and_ret!(lexer, Token::RightChevron),
+        ',' => next_and_ret!(lexer, Token::Comma),
+        '.' => next_and_ret!(lexer, Token::Period),
+        '@' => next_and_ret!(lexer, Token::At),
+        ':' => next_and_ret!(lexer, Token::Colon),
+        ';' => next_and_ret!(lexer, Token::Semicolon),
 
-        '?' => next_and_ret!(chars, Token::Question),
+        '?' => next_and_ret!(lexer, Token::Question),
 
         '"' => {
-          chars.next().unwrap();
+          lexer.next_char();
 
           let mut string = String::new();
 
-          while let Some(c) = chars.next() {
+          while let Some(c) = lexer.next_char() {
             if c == '"' { break }
             else { string.push(c); }
           }
 
-          Ok((chars.collect::<String>(), Token::String(string)))
+          Ok((lexer, Token::String(string)))
         },
 
         '=' => {
-          chars.next();
+          lexer.next_char();
 
-          if let Some(c) = chars.peek() {
-            if *c == '=' { chars.next(); return Ok((chars.collect::<String>(), Token::Equalescent)) }
-          }
-
-          Ok((chars.collect::<String>(), Token::Equal))
-        },
-
-        '!' => {
-          chars.next();
-
-          if let Some(c) = chars.peek() {
-            if *c == '=' { 
-              chars.next(); 
-              return Ok((chars.collect::<String>(), Token::NotEqualescent)) 
+          if let Some(c) = lexer.peek_char() {
+            if c == '=' { 
+              lexer.next_char();
+              return Ok((lexer, Token::Equalescent))
             }
           } 
 
-          Ok((chars.collect::<String>(), Token::Bang))
+          return Ok((lexer, Token::Equal))
+        },
+
+        '!' => {
+          lexer.next_char();
+
+          if let Some(c) = lexer.peek_char() {
+            if c == '=' { 
+              lexer.next_char(); 
+              return Ok((lexer, Token::NotEqualescent))
+            }
+          } 
+
+          Ok((lexer, Token::Bang))
         },
 
         '-' => {
-          chars.next();
+          lexer.next_char();
 
-          if let Some(c) = chars.peek() {
-            if *c == '>' { chars.next(); return Ok((chars.collect::<String>(), Token::RightArrow)) } 
+          if let Some(c) = lexer.peek_char() {
+            if c == '>' { 
+              lexer.next_char(); 
+              return Ok((lexer, Token::RightArrow))
+            } 
           }
 
-          Ok((chars.collect::<String>(), Token::Minus))
+          Ok((lexer, Token::Minus))
         },
 
         _ if c.is_alphabetic() =>
         {
           let mut out = String::new();
 
-          while let Some(c) = chars.peek()
+          while let Some(c) = lexer.peek_char()
           {
             if !c.is_alphanumeric() && !c.eq(&'_') { break }
-            out.push(chars.next().unwrap());
+            out.push(lexer.next_char().unwrap());
           }
 
-          Ok((chars.collect::<String>(), Token::Identifier(out)))
+          Ok((lexer, Token::Identifier(out)))
         },
         _ if c.is_numeric() =>
         {
           let mut out = String::new();
 
-          while let Some(c) = chars.peek()
+          while let Some(c) = lexer.peek_char()
           {
-            if !c.is_numeric() && *c != '.' { break }
-            else { out.push(chars.next().unwrap()); }
+            if !c.is_numeric() && c != '.' { break }
+            else { out.push(lexer.next_char().unwrap()); }
           }
 
-          Ok((chars.collect::<String>(), Token::Number(out.parse::<f64>().unwrap())))
+          Ok((lexer, Token::Number(out.parse::<f64>().unwrap())))
         }
         _ => panic!("unknown character in lexer, faulting!")
       }
     },
     None => Err("ran out of tokens to parse".to_owned())
   }
+
+    
 }
 
-#[macro_export]
-macro_rules! lex_peek
+pub fn lex_peek(lexer: &Lexer, fwd: usize) -> Result<(Lexer, Token), String>
 {
-  ($stream: expr, $peek: expr) => {
-    {   
-      assert!($peek >= 1);
-      let mut counter = 0;
-      let mut stream: String = $stream.to_owned();
-      loop
-      {
-        counter += 1;
+  let mut lexer = (*lexer).clone();
 
-        if let Ok(fwd) = lex(&stream) {
-          let tok: Token;
-          (stream, tok) = fwd;
-          if counter == $peek {
-            break Ok((stream, tok))
-          }
-        } else {
-          break Err("ran out of tokens to parse".to_owned())
-        }
-      }
-    }
+  if fwd < 1 { return Err("put 0 into peek for lexer".to_owned()); }
+  
+  let mut res;
+
+  for _ in 1..fwd {
+    (lexer, res) = lex(lexer)?;
   }
-}
 
+  Ok((lexer, res))
+}

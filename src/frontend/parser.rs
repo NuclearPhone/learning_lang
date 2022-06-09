@@ -1,11 +1,11 @@
-use std::{collections::HashMap, io::Write};
+use std::collections::HashMap;
 
-use crate::lex_peek;
-use super::lexer::{Token, lex};
+use super::lexer::{Token, lex, Lexer, lex_peek};
 
 #[derive(Debug, PartialEq, Clone)]
 pub enum TypeName
 {
+  Unset, // used for implicit types
   Void,
   Boolean,
   Numeric,
@@ -27,7 +27,7 @@ enum Node
   VarDef {name: String, typename: TypeName, exec: Box<Node>},
   FuncCall {name: String, args: Vec<Node>},
   InternalFuncCall {name: String, args: Vec<Node>},
-  TypeDef, // unimplmemented
+  TypeConstruction {typename: TypeName, child_constr: Vec<(String, Node)>}
 }
 
 #[derive(Debug)]
@@ -72,10 +72,20 @@ impl FunctionDef
   }
 }
 
+pub type Structure = Vec<(String, TypeName)>;
+
+#[derive(Debug)]
+pub struct TypeDef
+{
+  name: String,
+  enumerations: HashMap<String, Structure>
+}
+
 #[derive(Debug)]
 pub struct RootUnit
 {
   funcs: HashMap<String, FunctionDef>,
+  types: HashMap<String, TypeDef>
 }
 
 impl RootUnit
@@ -107,14 +117,28 @@ impl Node
   }
 }
 
-type Parser<T> = (String, T);
+struct TestNodeCommon {
+  line_id: usize,
+  token_id: usize, 
+}
+
+enum TestNodeData {
+  Token(Token, TestNodeCommon),
+  Binary(Box<TestNode>, Box<TestNode>, TestNodeCommon) 
+}
+
+struct TestParser {
+  lexer: Lexer,
+}
+
+type Parser<T> = (Lexer, T);
 type ParserResult<T> = Result<Parser<T>, String>;
 
-fn parse_id(stream: &str) -> ParserResult<Node>
+fn parse_id(lexer: Lexer) -> ParserResult<Node>
 {
-  if let Ok((stream, s @ Token::Identifier(_))) = lex(&stream)
+  if let Ok((lexer, s @ Token::Identifier(_))) = lex(lexer)
   {
-    Ok((stream, Node::TokenVal(s)))
+    Ok((lexer, Node::TokenVal(s)))
   }
   else
   {
@@ -122,22 +146,22 @@ fn parse_id(stream: &str) -> ParserResult<Node>
   }
 }
 
-fn parse_raw_id(stream: &str) -> ParserResult<String>
+fn parse_raw_id(lexer: Lexer) -> ParserResult<String>
 {
-  match lex(&stream)
+  match lex(lexer)
   {
-    Ok((stream, Token::Identifier(s))) => Ok((stream, s)),
+    Ok((lexer, Token::Identifier(s))) => Ok((lexer, s)),
     Ok((_, x)) => Err(format!("Failed to parse a raw identifier, found {:?}", x)),
     Err(_) => Err(format!("Failed to parse a raw identifier, ran out of tokens."))
   }
 }
 
-fn expect(stream: &str, tok_type: Token) -> Result<String, String>
+fn expect(lexer: Lexer, tok_type: Token) -> Result<Lexer, String>
 {
-  if let Ok((stream, tok)) = lex(stream)
+  if let Ok((lexer, tok)) = lex(lexer)
   {
     if tok == tok_type {
-      Ok(stream)
+      Ok(lexer)
     } else {
       Err(format!("Expected a token of type {:?}, but found {:?}", tok_type, tok))
     }
@@ -147,38 +171,38 @@ fn expect(stream: &str, tok_type: Token) -> Result<String, String>
 }
 
 // expect with custom error
-fn expect_err(stream: &str, tok_type: Token, fail: &str) -> Result<String, String>
+fn expect_err(lexer: Lexer, tok_type: Token, fail: &str) -> Result<Lexer, String>
 {
-  match expect(stream, tok_type)
+  match expect(lexer, tok_type)
   {
     o @ Ok(_) => o,
     Err(_) => Err(fail.to_owned())
   }
 }
 
-fn parse_input_parameters(stream: &str) -> ParserResult<Vec<Node>>
+fn parse_input_parameters(lexer: Lexer) -> ParserResult<Vec<Node>>
 {
-  let mut stream = expect_err(&stream, Token::LeftParanthesis, 
+  let mut lexer = expect_err(lexer, Token::LeftParanthesis, 
     "expected left paranthesis while attempting to parse input parameters for a function"
   )?;
 
-  if let (stream, Token::RightParanthesis) = lex(&stream)?
+  if let (lexer, Token::RightParanthesis) = lex(lexer)?
   {
-    Ok((stream, vec![]))
+    Ok((lexer, vec![]))
   } else {
     let mut params = vec![]; 
     loop
     {
       let node: Node;
-      (stream, node) = parse_expr(&stream)?;
+      (lexer, node) = parse_expr(lexer)?;
       params.push(node);
 
       let tok: Token;
-      (stream, tok) = lex(&stream)?;
+      (lexer, tok) = lex(lexer)?;
 
-      if tok == Token::RightParanthesis { break Ok((stream, params)) } 
+      if tok == Token::RightParanthesis { break Ok((lexer, params)) } 
       else { 
-        stream = expect_err(&stream, Token::Comma, 
+        lexer = expect_err(lexer, Token::Comma, 
           "expeted a comma after an identifier while attempting to 
           parse input parameters for a function"
         )? 
@@ -187,58 +211,84 @@ fn parse_input_parameters(stream: &str) -> ParserResult<Vec<Node>>
   }
 }
 
-fn parse_func_call(stream: &str) -> ParserResult<Node>
+fn parse_func_call(lexer: Lexer) -> ParserResult<Node>
 {
-  let (stream, name) = parse_raw_id(stream)?;
+  let (lexer, name) = parse_raw_id(lexer)?;
   
   // TODO: function parameters
-  let (stream, args) = parse_input_parameters(&stream)?;
+  let (lexer, args) = parse_input_parameters(lexer)?;
 
   Ok((
-    stream,
+    lexer,
     Node::FuncCall { name, args }
   ))
 }
 
-fn parse_internal_func_call(stream: &str) -> ParserResult<Node>
+fn parse_internal_func_call(lexer: Lexer) -> ParserResult<Node>
 {
-  let stream = expect(stream, Token::At,)?;
-  let (stream, name) = parse_raw_id(&stream)?;
+  let lexer = expect(lexer, Token::At,)?;
+  let (lexer, name) = parse_raw_id(lexer)?;
   
-  let (stream, args) = parse_input_parameters(&stream)?;
+  let (lexer, args) = parse_input_parameters(lexer)?;
 
   Ok((
-    stream,
+    lexer,
     Node::InternalFuncCall { name, args }
   ))
 }
 
-fn parse_factor(stream: &str) -> ParserResult<Node>
+fn parse_type_constr(lexer: Lexer) -> ParserResult<Node>
 {
-  if let Ok((used_stream, tok)) = lex(&stream)
+  println!("a");
+  let (lexer, typename) = parse_type(lexer)?;
+  let mut lexer = expect(lexer, Token::LeftBrace)?;
+
+  let mut child_constr = vec![];
+
+  loop {
+    if let (lexer, Token::RightBracket) = lex(lexer)? { 
+      break Ok((lexer, Node::TypeConstruction{typename, child_constr}))
+    } else {
+      let name: String;
+      let eval: Node;
+      (lexer, name) = parse_raw_id(lexer)?;
+      lexer = expect(lexer, Token::Colon)?;
+      (lexer, eval) = parse_assignment(lexer)?;
+
+      child_constr.push((name, eval));
+    }
+  }
+}
+
+fn parse_factor(lexer: Lexer) -> ParserResult<Node>
+{
+  if let Ok((used_lexer, tok)) = lex(lexer)
   {
     match tok 
     {
       Token::At =>
       {
-        parse_internal_func_call(&stream)
+        parse_internal_func_call(lexer)
       },
       Token::Identifier(_) =>
       {
-        if let Ok((_, Token::LeftParanthesis)) = lex_peek!(stream, 2) {
-          parse_func_call(stream)
+        if let Ok((_, Token::LeftParanthesis)) = lex_peek(&lexer, 2) {
+          parse_func_call(lexer)
+        } 
+        else if let Ok((_, Token::LeftBracket)) = lex_peek(&lexer, 2) {
+          parse_type_constr(lexer)
         } else {
-          Ok((used_stream, Node::TokenVal(tok)))
+          Ok((used_lexer, Node::TokenVal(tok)))
         }
       },
       Token::Number(_) | Token::String(_) => 
-        Ok((used_stream, Node::TokenVal(tok))),
+        Ok((used_lexer, Node::TokenVal(tok))),
       Token::LeftParanthesis => {
-        let (stream, inside) = parse_assignment(&used_stream)?;
-        let stream = expect_err(&stream, Token::RightParanthesis, 
+        let (lexer, inside) = parse_assignment(used_lexer)?;
+        let lexer = expect_err(lexer, Token::RightParanthesis, 
           "expected right paranthesis while parsing a factor"
         )?;
-        Ok((stream, inside))
+        Ok((lexer, inside))
       },
       _ => Err("Failed to parse a factor".to_owned())
     }
@@ -247,119 +297,119 @@ fn parse_factor(stream: &str) -> ParserResult<Node>
   }
 }
 
-fn parse_term(stream: &str) -> ParserResult<Node> 
+fn parse_term(lexer: Lexer) -> ParserResult<Node> 
 {
-  let (mut stream, mut left) = parse_factor(stream)?;
+  let (mut lexer, mut left) = parse_factor(lexer)?;
 
-  // peek forward, if it satisfies the condition feed the peek stream back into the actual stream
-  while let Ok((peek_stream, op @ (Token::Asterisk | Token::Solidus))) = lex(&stream)
+  // peek forward, if it satisfies the condition feed the peek lexer back into the actual lexer
+  while let Ok((peek_lexer, op @ (Token::Asterisk | Token::Solidus))) = lex(lexer)
   {
     let right: Node;
-    (stream, right) = parse_factor(&peek_stream)?;
+    (lexer, right) = parse_factor(peek_lexer)?;
     left = Node::make_binary(left, right, &op);
   }
 
-  Ok((stream, left))
+  Ok((lexer, left))
 }
 
-fn parse_expr(stream: &str) -> ParserResult<Node> 
+fn parse_expr(lexer: Lexer) -> ParserResult<Node> 
 {
-  let (mut stream, mut left) = parse_term(stream)?;
+  let (mut lexer, mut left) = parse_term(lexer)?;
 
-  while let Ok((peek_stream, op @ (Token::Plus | Token::Minus))) = lex(&stream)
+  while let Ok((peek_lexer, op @ (Token::Plus | Token::Minus))) = lex(lexer)
   {
     let right: Node;
-    (stream, right) = parse_term(&peek_stream)?;
+    (lexer, right) = parse_term(peek_lexer)?;
     left = Node::make_binary(left, right, &op)
   }
 
-  Ok((stream, left))
+  Ok((lexer, left))
 }
 
-fn parse_noteq(stream: &str) -> ParserResult<Node>
+fn parse_noteq(lexer: Lexer) -> ParserResult<Node>
 {
-  let (mut stream, mut left) = parse_expr(stream)?;
+  let (mut lexer, mut left) = parse_expr(lexer)?;
 
-  while let Ok((peek_stream, op @ (Token::LeftChevron | Token::RightChevron))) = lex(&stream)
+  while let Ok((peek_lexer, op @ (Token::LeftChevron | Token::RightChevron))) = lex(lexer)
   {
     let right: Node;
-    (stream, right) = parse_expr(&peek_stream)?;
+    (lexer, right) = parse_expr(peek_lexer)?;
     left = Node::make_binary(left, right, &op)
   }
 
-  Ok((stream, left))
+  Ok((lexer, left))
 }
 
-fn parse_eq(stream: &str) -> ParserResult<Node>
+fn parse_eq(lexer: Lexer) -> ParserResult<Node>
 {
-  let (mut stream, mut left) = parse_noteq(stream)?;
+  let (mut lexer, mut left) = parse_noteq(lexer)?;
 
-  while let Ok((peek_stream, op @ (Token::Equalescent | Token::NotEqualescent))) = lex(&stream)
+  while let Ok((peek_lexer, op @ (Token::Equalescent | Token::NotEqualescent))) = lex(lexer)
   {
     let right: Node;
-    (stream, right) = parse_noteq(&peek_stream)?;
+    (lexer, right) = parse_noteq(peek_lexer)?;
     left = Node::make_binary(left, right, &op)
   }
 
-  Ok((stream, left))
+  Ok((lexer, left))
 }
 
-fn parse_assignment(stream: &str) -> ParserResult<Node>
+fn parse_assignment(lexer: Lexer) -> ParserResult<Node>
 {
-  if let Ok((_, Token::Equal)) = lex_peek!(stream.to_owned(), 2)
+  if let Ok((_, Token::Equal)) = lex_peek(&lexer, 2)
   {
-    let (stream, left)  = parse_id(&stream)?; 
-    let stream = expect(&stream, Token::Equal)?;
-    let (stream, right) = parse_eq(&stream)?;
-    Ok((stream, Node::make_binary(left, right, &Token::Equal)))
+    let (lexer, left)  = parse_id(lexer)?; 
+    let lexer = expect(lexer, Token::Equal)?;
+    let (lexer, right) = parse_eq(lexer)?;
+    Ok((lexer, Node::make_binary(left, right, &Token::Equal)))
   }
   else
   {
-    parse_eq(stream)
+    parse_eq(lexer)
   }
 }
 
-fn parse_vardef(stream: &str) -> ParserResult<Node>
+fn parse_vardef(lexer: Lexer) -> ParserResult<Node>
 {
-  let (stream, name) = parse_raw_id(stream)?;
-  let mut stream = expect(&stream, Token::Colon)?;
+  let (lexer, name) = parse_raw_id(lexer)?;
+  let mut lexer = expect(lexer, Token::Colon)?;
 
   let typename: TypeName;
   let mut exec: Box<Node> = Box::new(Node::Nothing);
 
-  if let Ok((newstream, parsed_type)) = parse_type(&stream) {
-    stream = newstream;
+  if let Ok((newlexer, parsed_type)) = parse_type(lexer) {
+    lexer = newlexer;
     typename = parsed_type;
   } else { typename = TypeName::Void; }
 
-  if let Ok(newstream) = expect(&stream, Token::Equal) {
-    let (newstream, _exec) = parse_assignment(&newstream)?;
+  if let Ok(newlexer) = expect(lexer, Token::Equal) {
+    let (newlexer, _exec) = parse_assignment(newlexer)?;
     exec = Box::new(_exec);
-    stream = newstream;
+    lexer = newlexer;
   }
 
   Ok((
-    stream,
+    lexer,
     Node::VarDef{ name, typename, exec }
   ))
 }
 
-fn parse_statement_or_expr(stream: &str) -> ParserResult<Node>
+fn parse_statement_or_expr(lexer: Lexer) -> ParserResult<Node>
 {
-  if let (_, Token::Colon) = lex_peek!(stream, 2)? {
-    parse_vardef(stream)
+  if let (_, Token::Colon) = lex_peek(&lexer, 2)? {
+    parse_vardef(lexer)
   } else {
-    let (stream, condition) = parse_assignment(stream)?;
+    let (lexer, condition) = parse_assignment(lexer)?;
 
     // IF parsing
-    if let (stream, Token::Question) = lex(&stream)? {
-      let (stream, eval) = parse_assignment(&stream)?;
+    if let (lexer, Token::Question) = lex(lexer)? {
+      let (lexer, eval) = parse_assignment(lexer)?;
 
-      if let (stream, Token::Bang) = lex(&stream) ? {
-        let (stream, else_eval) = parse_statement_or_expr(&stream)?;
+      if let (lexer, Token::Bang) = lex(lexer) ? {
+        let (lexer, else_eval) = parse_statement_or_expr(lexer)?;
 
         Ok((
-          stream,
+          lexer,
           Node::If {
             condition: Box::new(condition),
             eval: Box::new(eval),
@@ -368,7 +418,7 @@ fn parse_statement_or_expr(stream: &str) -> ParserResult<Node>
         ))
       } else {
         Ok((
-          stream, 
+          lexer, 
           Node::If {
             condition: Box::new(condition),
             eval: Box::new(eval),
@@ -378,11 +428,11 @@ fn parse_statement_or_expr(stream: &str) -> ParserResult<Node>
       }
     }
     // WHILE PARSING
-    else if let (stream, Token::RightArrow) = lex(&stream)? {
-      let (stream, eval) = parse_block_or_stexpr(&stream)?;
+    else if let (lexer, Token::RightArrow) = lex(lexer)? {
+      let (lexer, eval) = parse_block_or_stexpr(lexer)?;
 
       Ok((
-        stream,
+        lexer,
         Node::While{
           condition: Box::new(condition),
           eval: Box::new(eval)
@@ -392,52 +442,51 @@ fn parse_statement_or_expr(stream: &str) -> ParserResult<Node>
 
     // if no statement, go to default parsing
     else {
-      Ok((stream, condition))
+      Ok((lexer, condition))
     }
   }
 }
 
-fn parse_block_or_stexpr(stream: &str) -> ParserResult<Node>
+fn parse_block_or_stexpr(lexer: Lexer) -> ParserResult<Node>
 {
-  if let Ok((stream, Token::LeftBrace)) = lex(stream)
+  if let Ok((mut lexer, Token::LeftBrace)) = lex(lexer)
   {
-    let mut stream: String = stream;
     let mut nodes = vec![];
 
     loop {
-      if let Ok((break_stream, tok)) = lex(&stream) {
-        if tok == Token::RightBrace { break stream = break_stream; }
-        let (continue_stream, node) = parse_statement_or_expr(&stream)?;
-        stream = continue_stream;
+      if let Ok((break_lexer, tok)) = lex(lexer) {
+        if tok == Token::RightBrace { break lexer = break_lexer; }
+        let (continue_lexer, node) = parse_statement_or_expr(lexer)?;
+        lexer = continue_lexer;
         nodes.push(node);
       } else {
         return Err("ran out of tokens while parsing a block".to_owned())
       }
     }
 
-    Ok((stream.to_owned(), Node::Block(nodes)))
-  } else { parse_statement_or_expr(stream) }
+    Ok((lexer, Node::Block(nodes)))
+  } else { parse_statement_or_expr(lexer) }
 }
 
-fn parse_type(stream: &str) -> ParserResult<TypeName>
+fn parse_type(lexer: Lexer) -> ParserResult<TypeName>
 {
-  let (stream, id) = parse_raw_id(stream)?;
+  let (lexer, id) = parse_raw_id(lexer)?;
   match id.as_str()
   {
-    "void"   => Ok((stream, TypeName::Void)),
-    "number" => Ok((stream, TypeName::Numeric)),
-    "bool"   => Ok((stream, TypeName::Boolean)),
-    "string" => Ok((stream, TypeName::String)),
+    "void"   => Ok((lexer, TypeName::Void)),
+    "number" => Ok((lexer, TypeName::Numeric)),
+    "bool"   => Ok((lexer, TypeName::Boolean)),
+    "string" => Ok((lexer, TypeName::String)),
     _ => Err("unknown typename".to_owned())
   }
 }
 
 // parses a PARAMETER DECLARATION, not an input for parameters
-fn parse_decl_parameters(stream: &str) -> ParserResult<Vec<(String, TypeName)>>
+fn parse_decl_parameters(lexer: Lexer) -> ParserResult<Vec<(String, TypeName)>>
 {
-  let mut stream = expect(stream, Token::LeftParanthesis)?;
+  let mut lexer = expect(lexer, Token::LeftParanthesis)?;
 
-  if let (stream, Token::RightParanthesis) = lex(&stream)? { Ok((stream, vec![])) }
+  if let (lexer, Token::RightParanthesis) = lex(lexer)? { Ok((lexer, vec![])) }
   else {
     let mut parameters: Vec<(String, TypeName)> = vec![];
 
@@ -446,40 +495,41 @@ fn parse_decl_parameters(stream: &str) -> ParserResult<Vec<(String, TypeName)>>
       let parsed_type: TypeName;
       let name: String;
 
-      (stream, name) = parse_raw_id(&stream)?;
-      stream = expect_err(&stream, Token::Colon, "expected a type-colon in parameter declaration")?;
-      (stream, parsed_type) = parse_type(&stream)?;
+      (lexer, name) = parse_raw_id(lexer)?;
+      lexer = expect_err(lexer, Token::Colon, "expected a type-colon in parameter declaration")?;
+      (lexer, parsed_type) = parse_type(lexer)?;
 
       parameters.push((name, parsed_type));
 
-      if let (stream, Token::RightParanthesis) = lex(&stream)? {
-        break Ok((stream, parameters));
-      } else { expect(&stream, Token::Comma)?; }
+      if let (lexer, Token::RightParanthesis) = lex(lexer)? {
+        break Ok((lexer, parameters));
+      } else { expect(lexer, Token::Comma)?; }
     }
   }
 }
 
-fn parse_function_definition(stream: &str) -> ParserResult<FunctionDef>
+fn parse_function_definition(lexer: Lexer) -> ParserResult<FunctionDef>
 {
   // messy, should write a dedicated "give me a basic string" function
-  let (stream, name) = parse_raw_id(stream)?;
+  let (lexer, name) = parse_raw_id(lexer)?;
   
-  let (stream, parameters) = parse_decl_parameters(&stream)?;
+  let (lexer, parameters) = parse_decl_parameters(lexer)?;
 
   let mut attribs = FunctionAttribs
   {
     internal: false
   };
 
-  let mut stream: String = stream; // redefine stream
-    
-  if let (attrib_stream, Token::LeftBracket) = lex(&stream)?
+  let mut lexer = lexer;
+
+  if let (attrib_lexer, Token::LeftBracket) = lex(lexer)?
   {
-    stream = attrib_stream;
+    lexer = attrib_lexer;
     loop
     {
-      let (attrib_stream, tok) = lex(&stream)?;
-      if tok == Token::RightBrace { break stream = attrib_stream; }
+      let tok: Token;
+      (lexer, tok) = lex(lexer)?;
+      if tok == Token::RightBracket { break }
       if let Token::Identifier(i) = tok
       {
         match i.as_str()
@@ -488,20 +538,20 @@ fn parse_function_definition(stream: &str) -> ParserResult<FunctionDef>
           _ => return Err(format!("unknown attribute {} in function attribute declaration", i))
         }
 
-        if let (comma_stream, Token::Comma) = lex(&stream)? { stream = comma_stream; }
+        if let (comma_lexer, Token::Comma) = lex_peek(&lexer, 1)? { lexer = comma_lexer; }
       } else {
         return Err("unexpected token in function attribute declaration".to_owned())
       }
     }
   }
 
-  let stream = expect(&stream, Token::RightArrow)?;
-  let (stream, rettype) = parse_type(&stream)?;
+  let lexer = expect(lexer, Token::RightArrow)?;
+  let (lexer, rettype) = parse_type(lexer)?;
 
-  let (stream, exec) = parse_block_or_stexpr(&stream)?;
+  let (lexer, exec) = parse_block_or_stexpr(lexer)?;
 
   Ok((
-    stream,
+    lexer,
     FunctionDef
     {
       name,
@@ -512,24 +562,42 @@ fn parse_function_definition(stream: &str) -> ParserResult<FunctionDef>
   ))
 }
 
-pub fn parse(stream_in: &str) -> Result<RootUnit, String>
+fn parse_type_declaration(lexer: Lexer) -> ParserResult<TypeDef>
 {
-  let mut stream: String = stream_in.to_owned();
+  let (lexer, name) = parse_raw_id(lexer)?;
+
+  Err("abc".to_owned())
+}
+
+pub fn parse(input: &str) -> Result<RootUnit, String>
+{
+  let mut lexer = Lexer::new(input);
 
   let mut funcs: HashMap<String, FunctionDef> = HashMap::new();
+  let mut types: HashMap<String, TypeDef> =  HashMap::new();
 
   // run until dry
-  while let Ok(_) = lex(&stream)
+  while let Ok(_) = lex_peek(&lexer, 1)
   {
-    if let Ok((_, Token::LeftParanthesis)) = lex_peek!(&stream, 2)
+    if let Ok((_, Token::LeftParanthesis)) = lex_peek(&lexer, 2)
     {
-      let (new_stream, func) = parse_function_definition(&stream)?;
-      stream = new_stream;
+      let func: FunctionDef;
+      (lexer, func) = parse_function_definition(lexer)?;
       
       if let None = funcs.get(&func.name) {
         funcs.insert(func.name.clone(), func);
       } else {
         return Err(format!("more than one function declaration of name {}", func.name));
+      }
+    } 
+    else if let Ok((_, Token::LeftBrace)) = lex_peek(&lexer, 2) {
+      let typedef: TypeDef;
+      (lexer, typedef) = parse_type_declaration(lexer)?;
+
+      if let None = types.get(&typedef.name) {
+        types.insert(typedef.name.clone(), typedef);
+      } else {
+        return Err(format!("more than one structure declaration of name {}", typedef.name));
       }
     } else {
       return Err("Unknown top level token".to_owned())
@@ -540,6 +608,7 @@ pub fn parse(stream_in: &str) -> Result<RootUnit, String>
     RootUnit
     {
       funcs,
+      types
     }
   )
 }
